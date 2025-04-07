@@ -353,9 +353,9 @@ def fetch_news_sentiment(symbol):
 
 
 def gyaani_baba_prediction(symbol, days=120):
-    """Predict future stock prices using Random Forest with calibration."""
+    """Predict future stock prices using Logistic Regression with calibration."""
     try:
-        # Fetch stock data for the past two years
+        # Fetch stock data for the past two years instead of one
         start_date = datetime.date.today() - pd.DateOffset(years=2)
         end_date = datetime.date.today()
         data = fetch_stock_data(symbol, start_date, end_date)
@@ -397,7 +397,7 @@ def gyaani_baba_prediction(symbol, days=120):
         # Find the index of Close price in the feature set
         close_index = list(df.columns).index('Close')
 
-        # Prepare data for Random Forest
+        # Prepare data for Logistic Regression
         X, y = [], []
         sequence_length = 60
 
@@ -413,25 +413,25 @@ def gyaani_baba_prediction(symbol, days=120):
         X_train, X_test = X[:train_size], X[train_size:]
         y_train, y_test = y[:train_size], y[train_size:]
 
-        # Define and train the Random Forest model
-        model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+        # Define and train the Logistic Regression model
+        model = LogisticRegression(max_iter=1000, random_state=42, C=1.0)
         model.fit(X_train, y_train)
 
         # Predictions
         train_pred = model.predict(X_train)
         test_pred = model.predict(X_test)
 
-        # Accuracy Scores (for classification-like evaluation)
-        train_pred_class = [1 if x > 0.5 else 0 for x in train_pred]
-        test_pred_class = [1 if x > 0.5 else 0 for x in test_pred]
-        train_accuracy = accuracy_score(y_train, train_pred_class)
-        test_accuracy = accuracy_score(y_test, test_pred_class)
+        # Accuracy Scores
+        train_accuracy = accuracy_score(y_train, train_pred)
+        test_accuracy = accuracy_score(y_test, test_pred)
 
         # Regression Metrics
         train_mse = mean_squared_error(y_train, train_pred)
         test_mse = mean_squared_error(y_test, test_pred)
+
         train_rmse = np.sqrt(train_mse)
         test_rmse = np.sqrt(test_mse)
+
         train_mae = mean_absolute_error(y_train, train_pred)
         test_mae = mean_absolute_error(y_test, test_pred)
 
@@ -445,8 +445,7 @@ def gyaani_baba_prediction(symbol, days=120):
         predicted_prices = [last_close]
 
         for i in range(days):
-            direction_prob = model.predict(current_sequence)[0]
-            direction = 1 if direction_prob > 0.5 else 0
+            direction = model.predict(current_sequence)[0]
             price_change = avg_price_change if direction == 1 else -avg_price_change
             next_price = predicted_prices[-1] + price_change
             predicted_prices.append(next_price)
@@ -511,7 +510,7 @@ def gyaani_baba_prediction(symbol, days=120):
     except Exception as e:
         st.error(f"❌ Error in prediction: {str(e)}")
         return None
-    
+
 if option == "Overall Market Status":
     market_data = fetch_market_data()
     display_market_interface(market_data)
