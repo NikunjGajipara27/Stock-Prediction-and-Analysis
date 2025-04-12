@@ -355,8 +355,8 @@ def fetch_news_sentiment(symbol):
 def gyaani_baba_prediction(symbol, days=30):
     """Predict future stock prices using an enhanced LSTM model with calibration."""
     try:
-        # Fetch stock data for the past two years instead of one
-        start_date = datetime.date.today() - pd.DateOffset(years=2)
+        # Fetch stock data for the past 5 years
+        start_date = datetime.date.today() - pd.DateOffset(years=5)
         end_date = datetime.date.today()
         data = fetch_stock_data(symbol, start_date, end_date)
 
@@ -364,203 +364,156 @@ def gyaani_baba_prediction(symbol, days=30):
             st.error("No data found for the given stock symbol.")
             return None
 
-        # Prepare data for model - create feature dataframe
+        # Prepare data for model
         df = pd.DataFrame()
         df['Open'] = data['Open']
         df['High'] = data['High']
         df['Low'] = data['Low']
         df['Close'] = data['Close']
         df['Volume'] = data['Volume']
-        
-        # Calculate technical indicators
+
+        # Add technical indicators
         df['SMA_5'] = df['Close'].rolling(window=5).mean()
         df['SMA_20'] = df['Close'].rolling(window=20).mean()
-        
+        df['RSI'] = RSIIndicator(df['Close'], window=14).rsi()
+        df['MACD'] = MACD(df['Close']).macd_diff()
+
         # Add price momentum features
         df['Price_Change'] = df['Close'].pct_change()
         df['Price_Change_5d'] = df['Close'].pct_change(5)
-        
+
         # Remove NaN values
         df = df.dropna()
-        
-        # Store closing prices for later use
-        close_prices = df[['Close']].values
-        
-        # Normalize all data for LSTM
+
+        # Normalize data
         scaler = MinMaxScaler(feature_range=(0, 1))
         scaled_data = scaler.fit_transform(df)
-        
-        # Create a separate scaler just for Close prices
-        close_scaler = MinMaxScaler(feature_range=(0, 1))
-        close_prices_scaled = close_scaler.fit_transform(close_prices)
-        
-        # Find the index of Close price in the feature set
-        close_index = list(df.columns).index('Close')
-        
-        # Prepare data for LSTM (Convert to sequences)
-        X, y = [], []
-        sequence_length = 60  # Increased from 50
 
+        # Create sequences for LSTM
+        sequence_length = 120  # Increased sequence length
+        X, y = [], []
+        close_index = list(df.columns).index('Close')
         for i in range(sequence_length, len(scaled_data)):
             X.append(scaled_data[i-sequence_length:i])
-            y.append(scaled_data[i, close_index])  # Target is Close price
+            y.append(scaled_data[i, close_index])
 
         X, y = np.array(X), np.array(y)
-        
-        # Split into train and test sets (80% train, 20% test)
+
+        # Split into train and test sets
         train_size = int(len(X) * 0.8)
         X_train, X_test = X[:train_size], X[train_size:]
         y_train, y_test = y[:train_size], y[train_size:]
 
-        # Define enhanced LSTM Model
+        # Define LSTM model
         model = Sequential([
             LSTM(128, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])),
-            BatchNormalization(),
             Dropout(0.3),
             LSTM(64, return_sequences=False),
             Dropout(0.3),
-            Dense(32, activation = 'relu'),
+            Dense(32, activation='relu'),
             Dense(1)
         ])
 
-        # Early stopping to prevent overfitting
+        # Compile model
+        optimizer = tf.keras.optimizers.Adam(learning_rate=0.0003)  # Reduced learning rate
+        model.compile(optimizer=optimizer, loss='mean_squared_error')
+
+        # Train model with early stopping
         early_stopping = tf.keras.callbacks.EarlyStopping(
             monitor='val_loss',
             patience=10,
             restore_best_weights=True
         )
-
-        # Compile model
-        optimizer = tf.keras.optimizers.Adam(learning_rate=0.001)
-        model.compile(optimizer=optimizer, loss='mean_squared_error')
-
-        # Train model with more epochs and early stopping
         history = model.fit(
-            X_train, y_train, 
-            validation_split = 0.1, # better validation control
-            epochs=30,
+            X_train, y_train,
+            validation_split=0.2,  # Increased validation split
+            epochs=30,  # Increased epochs
             batch_size=32,
-            # validation_data=(X_test, y_test),
             callbacks=[early_stopping],
             verbose=1
         )
 
-        # Model Performance Metrics
-        test_pred = model.predict(X_test).flatten()
+        # Evaluate model
         train_pred = model.predict(X_train).flatten()
-        y_test_pred = model.predict(X_test, verbose=0)
-        y_train_pred = model.predict(X_train, verbose=0)
+        test_pred = model.predict(X_test).flatten()
 
-        
-        # Inverse transform for metrics
+        # Inverse transform predictions
+        close_scaler = MinMaxScaler(feature_range=(0, 1))
+        close_scaler.fit(df[['Close']])
         train_pred_inv = close_scaler.inverse_transform(train_pred.reshape(-1, 1)).flatten()
         test_pred_inv = close_scaler.inverse_transform(test_pred.reshape(-1, 1)).flatten()
         y_train_inv = close_scaler.inverse_transform(y_train.reshape(-1, 1)).flatten()
         y_test_inv = close_scaler.inverse_transform(y_test.reshape(-1, 1)).flatten()
 
-        # Now calculate real-world metrics
-        train_mae = np.mean(np.abs(y_train_inv - train_pred_inv))
-        test_mae = np.mean(np.abs(y_test_inv - test_pred_inv))
-        train_rmse = np.sqrt(np.mean((y_train_inv - train_pred_inv) ** 2))
-        test_rmse = np.sqrt(np.mean((y_test_inv - test_pred_inv) ** 2))
+        # Calculate metrics
+        train_mae = mean_absolute_error(y_train_inv, train_pred_inv)
+        test_mae = mean_absolute_error(y_test_inv, test_pred_inv)
+        train_rmse = np.sqrt(mean_squared_error(y_train_inv, train_pred_inv))
+        test_rmse = np.sqrt(mean_squared_error(y_test_inv, test_pred_inv))
+        train_r2 = r2_score(y_train_inv, train_pred_inv)
+        test_r2 = r2_score(y_test_inv, test_pred_inv)
 
-        # Real-world R2 scores
-        train_r2 = r2_score(y_train, y_train_pred)
-        test_r2 = r2_score(y_test, y_test_pred)
+        # Display metrics
+        print("### Model Performance Metrics")
+        print("#### Training Data")
+        print(f"Mean Absolute Error (MAE): {train_mae:.4f}")
+        print(f"Root Mean Squared Error (RMSE): {train_rmse:.4f}")
+        print(f"R-squared (R²): {train_r2:.4f}")
 
+        print("#### Testing Data")
+        print(f"Mean Absolute Error (MAE): {test_mae:.4f}")
+        print(f"Root Mean Squared Error (RMSE): {test_rmse:.4f}")
+        print(f"R-squared (R²): {test_r2:.4f}")
 
         # Predict future prices
         future_predictions = []
-        
-        # Get the last sequence of actual data
         last_sequence = scaled_data[-sequence_length:]
         current_batch = last_sequence.reshape(1, sequence_length, scaled_data.shape[1])
-        
-        # Predict days ahead one at a time
-        for i in range(days):
-            # Make a prediction
+
+        for _ in range(days):
             next_pred = model.predict(current_batch, verbose=0)[0][0]
             future_predictions.append(next_pred)
-            
-            # Create a new data point (using last one as a template)
             new_point = current_batch[0][-1].copy()
             new_point[close_index] = next_pred
-            
-            # Update the batch - remove oldest, add newest
-            current_batch = np.append(current_batch[:, 1:, :], 
-                                     [new_point.reshape(1, scaled_data.shape[1])], 
-                                     axis=1)
-        
-        # Create an array just for close prices
-        close_predictions = np.array(future_predictions).reshape(-1, 1)
-        
-        # Convert predictions back to original price scale
-        predicted_prices = close_scaler.inverse_transform(close_predictions).flatten()
-        
-        # Get current market price for calibration
+            current_batch = np.append(current_batch[:, 1:, :],
+                                    [new_point.reshape(1, scaled_data.shape[1])],
+                                    axis=1)
+
+        # Inverse transform predictions
+        future_predictions = np.array(future_predictions).reshape(-1, 1)
+        predicted_prices = close_scaler.inverse_transform(future_predictions).flatten()
+
+        # Calibration with current market price
         ticker = yf.Ticker(symbol)
         currency_symbol = "₹" if symbol.endswith(".NS") else "$"
-        
-        try:
-            current_market_price = ticker.info.get('currentPrice', None)
-            latest_close = df['Close'].iloc[-1]
-            
-            if current_market_price and not pd.isna(current_market_price):
-                # If Yahoo Finance has the current price, use it for calibration
-                calibration_factor = current_market_price / predicted_prices[0]
-                st.info(f"Model calibrated with current market price: {currency_symbol}{current_market_price:.2f}")
-            else:
-                # If current price not available, use latest close price
-                current_market_price = latest_close
-                calibration_factor = latest_close / predicted_prices[0]
-                st.info(f"Model calibrated with latest closing price: {currency_symbol}{latest_close:.2f}")
-            
-            # Apply calibration factor to all predictions
-            calibrated_predictions = predicted_prices * calibration_factor
-            
-            # Display both the raw and calibrated predictions
-            st.write("### 🔮 Future Stock Price Predictions:")
-            
-            df_predictions = pd.DataFrame({
-                "Day": list(range(1, days + 1)),
-                f"Raw Predicted Price ({currency_symbol})": predicted_prices,
-                f"Calibrated Predicted Price ({currency_symbol})": calibrated_predictions
-            })
-            
-            st.dataframe(df_predictions)
-            
-            # Model performance metrics
-            print("\n### 📊 Model Performance Metrics:")
-            print("--------------------------------------------------")
-            print(f"✔️ Training R-squared Score: {train_r2:.4f}")
-            print(f"✔️ Testing R-squared Score: {test_r2:.4f}")
-            print(f"✔️ Training RMSE Value : {train_rmse:.4f}")
-            print(f"✔️ Testing RMSE Value : {train_rmse:.4f}")
-            print(f"✔️ Training MAE Value : {train_mae:.4f}")
-            print(f"✔️ Testing MAE Value : {test_mae:.4f}")
-            print(f"✔️ Calibration Factor: {calibration_factor:.4f}")
-        
-            
-            # Return the calibrated predictions
-            return calibrated_predictions
-            
-        except Exception as e:
-            st.error(f"Error in calibration: {str(e)}")
-            
-            # If calibration fails, return uncalibrated predictions
-            st.write("### 🔮 Future Stock Price Predictions (Uncalibrated):")
-            df_predictions = pd.DataFrame({
-                "Day": list(range(1, days + 1)),
-                f"Predicted Price ({currency_symbol})": predicted_prices
-            })
-            st.dataframe(df_predictions)
-            
-            return predicted_prices
+        current_market_price = ticker.info.get('currentPrice', df['Close'].iloc[-1])
+        calibration_factor = current_market_price / predicted_prices[0]
+        calibrated_predictions = predicted_prices * calibration_factor
+
+        # Display predictions
+        st.write("### 🔮 Future Stock Price Predictions")
+        df_predictions = pd.DataFrame({
+            "Day": list(range(1, days + 1)),
+            f"Calibrated Predicted Price ({currency_symbol})": calibrated_predictions
+        })
+        st.dataframe(df_predictions)
+
+        # Plot predictions
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=df.index[-60:], y=df['Close'][-60:], mode='lines', name='Historical'))
+        fig.add_trace(go.Scatter(x=pd.date_range(start=df.index[-1], periods=days+1, freq='B')[1:],
+                               y=calibrated_predictions, mode='lines', name='Forecast', line=dict(dash='dash')))
+        fig.update_layout(title=f"{symbol} {days}-Day Forecast",
+                         xaxis_title="Date",
+                         yaxis_title="Price",
+                         template="plotly_dark")
+        # st.plotly_chart(fig)
+
+        return calibrated_predictions
 
     except Exception as e:
-        st.error(f"❌ Error in prediction: {str(e)}")
+        st.error(f"Error in prediction: {str(e)}")
         return None
-
 
 if option == "Overall Market Status":
     market_data = fetch_market_data()
